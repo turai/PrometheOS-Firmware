@@ -5,6 +5,7 @@
 #include "httpServer.h"
 #include "settingsManager.h"
 #include "xboxInternals.h"
+#include "xdonServer.h"
 
 void network::init()
 {
@@ -40,6 +41,8 @@ void network::init()
 #ifndef TOOLS
 		httpServer::init();
 #endif
+
+		xdonServer::init();
 
 		context::setNetworkInitialized(true);
 	}
