@@ -19,6 +19,10 @@ public:
 private:
 	static bool WINAPI serverThread(LPVOID lParam);
 	static bool WINAPI clientThread(LPVOID lParam);
+	
+	static bool isDeviceOpen(DeviceIndex device);
+	static NTSTATUS openDevice(DeviceIndex device);
+
 	static int receiveAndValidateRequest(XDONClientData *clientData, struct sockaddr_in *sender, size_t senderSize);
 	static void processRequest(XDONClientData *clientData, struct sockaddr_in *sender, size_t senderSize, XDONCommand command);
 	static int networkRead(SOCKET sock, uint8_t *buffer, int bufferLen, struct sockaddr_in *sender);

@@ -18,6 +18,8 @@ typedef enum DeviceIndex
 	XDON_DEVICE_MU7 = 9,
 	XDON_DEVICE_DVDROM = 10,
 	XDON_DEVICE_MAX = 11,
+	XDON_DEVICE_MUS_MIN = 2,
+	XDON_DEVICE_MUS_MAX = 9,
 } DeviceIndex;
 
 struct DeviceInfo

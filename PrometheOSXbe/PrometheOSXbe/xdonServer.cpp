@@ -179,7 +179,7 @@ bool WINAPI xdonServer::clientThread(LPVOID lParam)
 			utils::debugPrint("Client disconnected");
 			break;
 		}
-		Sleep(1); // Yield
+		SwitchToThread();
 	}
 	InterlockedDecrement(&connectedClients);
 	socketUtility::closeSocket(clientData->sock);
@@ -187,6 +187,40 @@ bool WINAPI xdonServer::clientThread(LPVOID lParam)
 	XMemFree(clientData->responseMemory, PHYSICAL_MEMORY_ATTRS);
 	XMemFree(clientData, HEAP_MEMORY_ATTRS);
 	return false;
+}
+
+inline bool xdonServer::isDeviceOpen(DeviceIndex device) {
+	return devices[device].mutex != NULL && devices[device].handle != INVALID_HANDLE_VALUE;
+}
+
+NTSTATUS xdonServer::openDevice(DeviceIndex device) {
+	if (device >= XDON_DEVICE_MAX) {
+		return -EINVAL;
+	}
+	struct DeviceInfo* deviceInfo = &devices[device];
+	if (deviceInfo->mutex == NULL) {
+		deviceInfo->mutex = CreateMutex(NULL, true, NULL);
+	}
+	NTSTATUS status;
+	OBJECT_ATTRIBUTES objectAttrs;
+	IO_STATUS_BLOCK ioStatusBlock;
+	char deviceName[64];
+	STRING str;
+	str.Buffer = deviceName;
+	str.Length = 0;
+	str.MaximumLength = sizeof(deviceName) / sizeof(char) - 2;
+	if (deviceInfo->handle != INVALID_HANDLE_VALUE) {
+		NtClose(deviceInfo->handle);
+		deviceInfo->handle = INVALID_HANDLE_VALUE;
+	}
+	RtlInitAnsiString(&str, deviceInfo->path);
+	InitializeObjectAttributes(&objectAttrs, &str, OBJ_CASE_INSENSITIVE, NULL);
+	status = NtOpenFile(&deviceInfo->handle, GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, &objectAttrs, &ioStatusBlock, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT);
+	if (status < 0) {
+		deviceInfo->handle = INVALID_HANDLE_VALUE;
+	}
+	ReleaseMutex(deviceInfo->mutex);
+	return status;
 }
 
 bool xdonServer::init()
@@ -291,6 +325,7 @@ int xdonServer::receiveAndValidateRequest(XDONClientData *clientData, sockaddr_i
 			XDONReadRequest *request = (XDONReadRequest *)clientData->requestMemory;
 			if (request->device >= XDON_DEVICE_MAX || request->length == 0 || request->length > XDON_MAX_IO_SIZE)
 			{
+				utils::debugPrint("bad read req off=%d len=%d!\n", request->offset, request->length);
 				return -1;
 			}
 			break;
@@ -300,10 +335,12 @@ int xdonServer::receiveAndValidateRequest(XDONClientData *clientData, sockaddr_i
 			XDONWriteRequest *request = (XDONWriteRequest *)clientData->requestMemory;
 			if (request->device >= XDON_DEVICE_MAX || request->length == 0 || request->length > XDON_MAX_IO_SIZE)
 			{
+				utils::debugPrint("bad write req off=%d len=%d!\n", request->offset, request->length);
 				return -1;
 			}
 			if (networkRead((SOCKET)clientData->sock, request->data, request->length, sender) < 0)
 			{
+				utils::debugPrint("err read wdata\n", request->offset, request->length);
 				return -1;
 			}
 			break;
@@ -313,6 +350,7 @@ int xdonServer::receiveAndValidateRequest(XDONClientData *clientData, sockaddr_i
 			XDONWriteSameRequest *request = (XDONWriteSameRequest *)clientData->requestMemory;
 			if (request->device >= XDON_DEVICE_MAX || request->length == 0 || request->length > XDON_MAX_IO_SIZE)
 			{
+				utils::debugPrint("bad write same req off=%d val=%d len=%d!\n", request->offset, request->value, request->length);
 				return -1;
 			}
 			break;
@@ -387,6 +425,8 @@ void xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender,
 				payload->length = isZero(payload->data, request->length) ? 0 : request->length;
 				payload->uncompressedLength = payload->length;
 				offset += payload->length;
+			} else {
+				utils::debugPrint("read status ERR=%d off=%d len=%d\n", response->statusCode, request->offset, request->length);
 			}
 			break;
 		}
@@ -394,6 +434,9 @@ void xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender,
 		{
 			XDONWriteRequest *request = (XDONWriteRequest*)clientData->requestMemory;
 			response->statusCode = writeDevice((DeviceIndex)request->device, request->offset, request->data, request->length);
+			if (response->statusCode < 0) {
+				utils::debugPrint("write status ERR=%d off=%d len=%d\n", response->statusCode, request->offset, request->length);
+			}
 			break;
 		}
 	case WriteSame:
@@ -464,7 +507,6 @@ int xdonServer::networkRead(SOCKET sock, uint8_t *outBuf, int outBufSize, struct
 		result = recvfrom(sock, (char *)(outBuf + recvSize), outBufSize - recvSize, 0, (struct sockaddr *)sender, &fromLen);
 		if (result < 0)
 		{
-			utils::debugPrint("Error reading request: %i\n", WSAGetLastError());
 			return result;
 		}
 		recvSize += (size_t)result;
@@ -489,7 +531,6 @@ int xdonServer::networkSendUDP(SOCKET sock, uint8_t *buffer, int bufferLen, stru
 		result = sendto(sock, (const char *)(buffer + sentLen), bufferLen - sentLen, 0, (const sockaddr *)sender, sizeof(*sender));
 		if (result < 0)
 		{
-			utils::debugPrint("Error sending UDP response: %i\n", WSAGetLastError());
 			return result;
 		}
 		sentLen += result;
@@ -505,7 +546,6 @@ int xdonServer::networkSendTCP(SOCKET sock, uint8_t *buffer, int bufferLen)
 		result = send(sock, (const char *)(buffer + sentLen), bufferLen - sentLen, 0);
 		if (result < 0)
 		{
-			utils::debugPrint("Error sending TCP response: %i\n", WSAGetLastError());
 			return result;
 		}
 		sentLen += result;
@@ -515,16 +555,15 @@ int xdonServer::networkSendTCP(SOCKET sock, uint8_t *buffer, int bufferLen)
 
 void xdonServer::getDevices(XDONDevices *payload)
 {
-	int waitResult;
-	for (int i = 0; i < 11; i++)
+	for (int i = 0; i < XDON_DEVICE_MAX; i++)
 	{
-		if (devices[i].mutex == NULL)
-		{
-			devices[i].mutex = CreateMutex(NULL, true, NULL);
+		if (!isDeviceOpen((DeviceIndex)i)) {
+			if (openDevice((DeviceIndex)i) < 0) {
+				continue;
+			}
 		}
-		else
-		{
-			waitResult = WaitForSingleObject(devices[i].mutex, INFINITE);
+		while (WaitForSingleObject(devices[i].mutex, 250) != WAIT_OBJECT_0) {
+			SwitchToThread();
 		}
 	}
 	NTSTATUS status;
@@ -533,7 +572,7 @@ void xdonServer::getDevices(XDONDevices *payload)
 	str.Length = 0;
 	str.MaximumLength = sizeof(deviceName) / sizeof(char) - 2;
 	str.Buffer = deviceName;
-	for (int i = 0; i < 8; i += 2)
+	for (int i = 0; i < XDON_DEVICE_MUS_MAX - XDON_DEVICE_MUS_MIN; i += 2)
 	{
 		if (memoryUnits[i])
 		{
@@ -550,23 +589,7 @@ void xdonServer::getDevices(XDONDevices *payload)
 		status = MU_CreateDeviceObject(i / 2, XDEVICE_BOTTOM_SLOT, &str);
 		memoryUnits[i + 1] = status >= 0;
 	}
-	OBJECT_ATTRIBUTES objectAttrs;
 	IO_STATUS_BLOCK ioStatusBlock;
-	for (int i = 0; i < 11; i++)
-	{
-		if (devices[i].handle != INVALID_HANDLE_VALUE)
-		{
-			NtClose(devices[i].handle);
-			devices[i].handle = INVALID_HANDLE_VALUE;
-		}
-		RtlInitAnsiString(&str, devices[i].path);
-		InitializeObjectAttributes(&objectAttrs, &str, OBJ_CASE_INSENSITIVE, NULL);
-		status = NtOpenFile(&devices[i].handle, GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, &objectAttrs, &ioStatusBlock, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT);
-		if (status < 0)
-		{
-			devices[i].handle = INVALID_HANDLE_VALUE;
-		}
-	}
 	if (devices[XDON_DEVICE_HARD_DISK_0].handle != INVALID_HANDLE_VALUE)
 	{
 		status = NtDeviceIoControlFile(devices[XDON_DEVICE_HARD_DISK_0].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->hardDrive0Geometry, sizeof(DISK_GEOMETRY));
@@ -647,19 +670,26 @@ void xdonServer::getDevices(XDONDevices *payload)
 
 int xdonServer::readDevice(DeviceIndex device, uint64_t offset_, uint8_t *buffer, int bufferLen)
 {
+	NTSTATUS status;
 	if (device > XDON_DEVICE_MAX)
 	{
-		return -1;
+		return -EINVAL;
 	}
-	if (devices[device].mutex == NULL)
+	// This is required if FATXplorer didn't do a GetDevices call (eg. the user restarts prom after a refresh)
+	if (!isDeviceOpen(device))
 	{
-		return -1;
+		status = openDevice(device);
+		if (status < 0) {
+			return status;
+		}
 	}
-	NTSTATUS status;
+	struct DeviceInfo* deviceInfo = &devices[device];
+	while (WaitForSingleObject(devices[device].mutex, 250) != WAIT_OBJECT_0) {
+		SwitchToThread();
+	}
 	IO_STATUS_BLOCK ioStatusBlock;
 	LARGE_INTEGER offset;
 	offset.QuadPart = offset_;
-	WaitForSingleObject(devices[device].mutex, INFINITE);
 	status = NtReadFile(devices[device].handle, NULL, NULL, NULL, &ioStatusBlock, buffer, bufferLen, &offset);
 	ReleaseMutex(devices[device].mutex);
 	return status;
@@ -667,19 +697,24 @@ int xdonServer::readDevice(DeviceIndex device, uint64_t offset_, uint8_t *buffer
 
 int xdonServer::writeDevice(DeviceIndex device, uint64_t offset_, uint8_t *buffer, int bufferLen)
 {
+	NTSTATUS status;
 	if (device > XDON_DEVICE_MAX)
 	{
-		return -1;
+		return -EINVAL;
 	}
-	if (devices[device].mutex == NULL)
+	if (!isDeviceOpen(device))
 	{
-		return -1;
+		status = openDevice(device);
+		if (status < 0) {
+			return status;
+		}
 	}
-	NTSTATUS status;
 	IO_STATUS_BLOCK ioStatusBlock;
 	LARGE_INTEGER offset;
 	offset.QuadPart = offset_;
-	WaitForSingleObject(devices[device].mutex, INFINITE);
+	while (WaitForSingleObject(devices[device].mutex, 250) != WAIT_OBJECT_0) {
+		SwitchToThread();
+	}
 	status = NtWriteFile(devices[device].handle, NULL, NULL, NULL, &ioStatusBlock, buffer, bufferLen, &offset);
 	ReleaseMutex(devices[device].mutex);
 	return status;
