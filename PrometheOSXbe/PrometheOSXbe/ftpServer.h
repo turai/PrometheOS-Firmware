@@ -24,6 +24,7 @@ public:
 
 	static bool init();
 	static void close();
+	static bool hasActiveConnections();
 	static bool socketSendString(uint64_t s, const char *psz);
 	static ReceiveStatus socketReceiveString(uint64_t s, char *psz, uint32_t dwMaxChars, uint32_t* pdwCharsReceived);
 	static ReceiveStatus socketReceiveLetter(uint64_t s, char* pch, uint32_t dwMaxChars, uint32_t* pdwCharsReceived);

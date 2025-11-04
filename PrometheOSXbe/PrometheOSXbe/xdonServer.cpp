@@ -1,4 +1,6 @@
 #include "XDON/definitions.h"
+#include "driveManager.h"
+#include "ftpServer.h"
 #include "xdonServer.h"
 #include "utils.h"
 #include "xboxinternals.h"
@@ -53,6 +55,11 @@ bool isZero(uint8_t* buffer, int len) {
 			setz isZero
 	};
 	return isZero != 0;
+}
+
+bool xdonServer::hasConnectedClients() {
+	int clients = InterlockedCompareExchange(&connectedClients, 0, 0);
+	return clients != 0;
 }
 
 bool WINAPI xdonServer::serverThread(LPVOID lParam)
@@ -152,9 +159,21 @@ bool WINAPI xdonServer::serverThread(LPVOID lParam)
 
 bool WINAPI xdonServer::clientThread(LPVOID lParam)
 {
-	InterlockedIncrement(&connectedClients);
-	int result;
 	XDONClientData *clientData = (XDONClientData *)lParam;
+	// This could be racy
+	InterlockedIncrement(&connectedClients);
+	if (ftpServer::hasActiveConnections()) {
+		InterlockedDecrement(&connectedClients);
+		goto cleanup;
+	} else {
+		// Fine to terminate this late, write is not supported over UDP
+		// We don't know if the user wants to write to the disk (TODO: Add read only mode!) and if the program
+		// has to wait for the FTP server to terminate during a Write(Same) request then FATXplorer will
+		// potentially time out
+		ftpServer::close();
+	}
+	driveManager::unmountAllDrives();
+	int result;
 	while (mStopRequested == false)
 	{
 		result = receiveAndValidateRequest(clientData, NULL, 0);
@@ -182,6 +201,12 @@ bool WINAPI xdonServer::clientThread(LPVOID lParam)
 		SwitchToThread();
 	}
 	InterlockedDecrement(&connectedClients);
+	if (!hasConnectedClients()) {
+		// TODO There's a possibility driveMounter::startThread(true) will be used in the future, must be tracked somehow
+		driveManager::mountAllDrives();
+		ftpServer::init();
+	}
+cleanup:
 	socketUtility::closeSocket(clientData->sock);
 	XMemFree(clientData->requestMemory, PHYSICAL_MEMORY_ATTRS);
 	XMemFree(clientData->responseMemory, PHYSICAL_MEMORY_ATTRS);
@@ -261,9 +286,22 @@ bool xdonServer::init()
 
 void xdonServer::close()
 {
-	mStopRequested = true;
-	WaitForSingleObject(mServerThreadHandle, INFINITE);
-	CloseHandle(mServerThreadHandle);
+	if (mServerThreadHandle != NULL) {
+		mStopRequested = true;
+		WaitForSingleObject(mServerThreadHandle, INFINITE);
+		CloseHandle(mServerThreadHandle);
+		for (int i = 0; i < XDON_DEVICE_MAX; i++) {
+			if (devices[i].handle != INVALID_HANDLE_VALUE) {
+				NtClose(devices[i].handle);
+				devices[i].handle = INVALID_HANDLE_VALUE;
+			}
+			if (devices[i].mutex != NULL) {
+				CloseHandle(devices[i].mutex);
+				devices[i].mutex = NULL;
+			}
+		}
+		mServerThreadHandle = NULL;
+	}
 }
 
 int xdonServer::receiveAndValidateRequest(XDONClientData *clientData, sockaddr_in *sender, size_t senderSize)
@@ -470,15 +508,15 @@ void xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender,
 	case RebootShutdown:
 		{
 			/* PXDON_COMMAND_REBOOT_SHUTDOWN_CONSOLE_REQUEST request = (PXDON_COMMAND_REBOOT_SHUTDOWN_CONSOLE_REQUEST)ThreadParam->Memories.RequestMemory;
-				Print(PRINT_VERBOSITY_FLAG_REQUESTS, "FulfillRequest (%X): Fulfilling XDON_COMMAND_REBOOT_SHUTDOWN_CONSOLE.", ThreadParam->ClientSocket);
-				frame.StatusCode = STATUS_SUCCESS;
+			Print(PRINT_VERBOSITY_FLAG_REQUESTS, "FulfillRequest (%X): Fulfilling XDON_COMMAND_REBOOT_SHUTDOWN_CONSOLE.", ThreadParam->ClientSocket);
+			frame.StatusCode = STATUS_SUCCESS;
 
-				if (!SockSend(ThreadParam->ClientSocket, &frame, sizeof(frame), NULL, 0, To, ToLen)) Print(PRINT_VERBOSITY_FLAG_ESSENTIAL_AND_ERRORS, "FulfillRequest (%X): Failed to send response: %d", ThreadParam->ClientSocket, WSAGetLastError());
+			if (!SockSend(ThreadParam->ClientSocket, &frame, sizeof(frame), NULL, 0, To, ToLen)) Print(PRINT_VERBOSITY_FLAG_ESSENTIAL_AND_ERRORS, "FulfillRequest (%X): Failed to send response: %d", ThreadParam->ClientSocket, WSAGetLastError());
 
-				Print(PRINT_VERBOSITY_FLAG_REQUESTS, "FulfillRequest (%X): Executing routine %d right now.", ThreadParam->ClientSocket, request->Routine);
-                //Let's use max to determine whether to shutdown. There is no other valid use for it so we can use it to keep the command the same as the Xbox 360 version.
-                if ((FIRMWARE_REENTRY)request->Routine == HalMaximumRoutine) HalInitiateShutdown();
-				else HalReturnToFirmware((FIRMWARE_REENTRY)request->Routine);*/
+			Print(PRINT_VERBOSITY_FLAG_REQUESTS, "FulfillRequest (%X): Executing routine %d right now.", ThreadParam->ClientSocket, request->Routine);
+			//Let's use max to determine whether to shutdown. There is no other valid use for it so we can use it to keep the command the same as the Xbox 360 version.
+			if ((FIRMWARE_REENTRY)request->Routine == HalMaximumRoutine) HalInitiateShutdown();
+			else HalReturnToFirmware((FIRMWARE_REENTRY)request->Routine);*/
 			break;
 		}
 	default:

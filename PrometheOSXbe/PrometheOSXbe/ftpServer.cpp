@@ -7,6 +7,7 @@
 #include <string>
 #include "stringUtility.h"
 #include "utils.h"
+#include "xdonServer.h"
 
 #include <xtl.h>
 
@@ -257,7 +258,13 @@ bool WINAPI ftpServer::connectionThread(uint64_t sCmd)
 				socketSendString(sCmd, "503 Already logged in. Use REIN to change users.\r\n");
 			} else {
 				if (stringUtility::equals(user, "xbox", false) && stringUtility::equals(pszParam, "xbox", false)) {
+					if (xdonServer::hasConnectedClients()) {
+						socketSendString(sCmd, "421 An XDON client is connected, FTP unavailable.\r\n");
+						break;
+					}
 					if (incrementConnections() <= mMaxConnections) {
+						// Also racy
+						xdonServer::close();
 						isLoggedIn = true;
 						free(currentVirtual);
 						currentVirtual = strdup("/");
@@ -1007,6 +1014,10 @@ bool WINAPI ftpServer::connectionThread(uint64_t sCmd)
 		decrementConnections();
 	}
 
+	if (!hasActiveConnections()) {
+		xdonServer::init();
+	}
+
 	return false;
 }
 
@@ -1078,9 +1089,18 @@ bool ftpServer::init()
 
 void ftpServer::close()
 {
-	mStopRequested = true;
-	WaitForSingleObject(mListenThreadHandle, INFINITE);
-	CloseHandle(mListenThreadHandle);
+	if (mListenThreadHandle != NULL) {
+		mStopRequested = true;
+		WaitForSingleObject(mListenThreadHandle, INFINITE);
+		CloseHandle(mListenThreadHandle);
+		mListenThreadHandle = NULL;
+	}
+}
+
+bool ftpServer::hasActiveConnections()
+{
+	int currentActiveConnections = InterlockedCompareExchange(&activeConnections, 0, 0);
+	return currentActiveConnections != 0;
 }
 
 bool ftpServer::socketSendString(uint64_t s, const char *psz)

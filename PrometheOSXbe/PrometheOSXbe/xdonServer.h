@@ -6,6 +6,7 @@
 class xdonServer
 {
 public:
+	static bool hasConnectedClients();
 	static bool init();
 	static void close();
 
@@ -19,7 +20,7 @@ public:
 private:
 	static bool WINAPI serverThread(LPVOID lParam);
 	static bool WINAPI clientThread(LPVOID lParam);
-	
+
 	static bool isDeviceOpen(DeviceIndex device);
 	static NTSTATUS openDevice(DeviceIndex device);
 
