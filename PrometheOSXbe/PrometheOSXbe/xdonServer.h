@@ -7,6 +7,9 @@ class xdonServer
 {
 public:
 	static bool hasConnectedClients();
+	static int connectedClients();
+	static unsigned long long bytesRead();
+	static unsigned long long bytesWritten();
 	static bool init();
 	static void close();
 
@@ -24,8 +27,7 @@ private:
 	static bool isDeviceOpen(DeviceIndex device);
 	static NTSTATUS openDevice(DeviceIndex device);
 
-	static int receiveAndValidateRequest(XDONClientData *clientData, struct sockaddr_in *sender, size_t senderSize);
-	static void processRequest(XDONClientData *clientData, struct sockaddr_in *sender, size_t senderSize, XDONCommand command);
+	static int processRequest(XDONClientData *clientData, struct sockaddr_in *sender, size_t senderSize);
 	static int networkRead(SOCKET sock, uint8_t *buffer, int bufferLen, struct sockaddr_in *sender);
 	static int networkSendUDP(SOCKET sock, uint8_t *buffer, int bufferLen, struct sockaddr_in *sender);
 	static int networkSendTCP(SOCKET sock, uint8_t *buffer, int bufferLen);

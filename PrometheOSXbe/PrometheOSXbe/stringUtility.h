@@ -30,7 +30,7 @@ public:
 	static void copyString(char* dest, char *source, uint32_t maxLength);
 	static int toInt(const char* value);
 	static int hexCharToInt(char c);
-	static char* formatSize(uint32_t size);
+	static char* formatSize(uint64_t size);
 	static char* formatIp(uint32_t ip);
 	static char* padString(const char* message, uint32_t len);
 	static char* formatLcdString(const char* message, uint32_t maxlen);

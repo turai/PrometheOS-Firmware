@@ -1981,6 +1981,9 @@
 				<File
 					RelativePath=".\Scenes\videoSettingsScene.cpp">
 				</File>
+				<File
+					RelativePath=".\Scenes\xdonLockoutScene.cpp">
+				</File>
 			</Filter>
 			<Filter
 				Name="Threads"
@@ -2474,6 +2477,9 @@
 				</File>
 				<File
 					RelativePath=".\Scenes\videoSettingsScene.h">
+				</File>
+				<File
+					RelativePath=".\Scenes\xdonLockoutScene.h">
 				</File>
 			</Filter>
 			<Filter

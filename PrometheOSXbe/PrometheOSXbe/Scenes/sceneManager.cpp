@@ -36,6 +36,7 @@
 #include "formatDriveScene.h"
 #include "launcherFlowScene.h"
 #include "dlcSignerScene.h"
+#include "xdonLockoutScene.h"
 
 #include "..\xboxConfig.h"
 #include "..\context.h"
@@ -50,10 +51,14 @@
 namespace 
 {
 	pointerVector<sceneContainer*>* mScenes = new pointerVector<sceneContainer*>(true);
+	sceneContainer* mForcedScene = NULL;
 }
 
 scene* sceneManager::getScene()
 {
+	if (mForcedScene != NULL) {
+		return mForcedScene->scene;
+	}
 	sceneContainer* result = mScenes->get(mScenes->count() - 1);
 	return result->scene;
 }
@@ -463,6 +468,39 @@ void sceneManager::popScene(sceneResult result)
 	}
 
 	context::setCurrentTitle(container->description);
+}
+
+void sceneManager::forceScene(sceneItemEnum forcedSceneItem)
+{
+	if (mForcedScene != NULL) {
+		removeForcedScene();
+	}
+	scene* scene = NULL;
+	const char* description = NULL;
+	switch (forcedSceneItem) {
+		case sceneItemXDONLockout:
+			scene = new xdonLockoutScene();
+			description = "XDON Lockout";
+			break;
+		default:
+			return;
+	}
+	sceneContainer* container = new sceneContainer(forcedSceneItem, scene, description);
+	mForcedScene = container;
+}
+
+sceneItemEnum sceneManager::currentForcedScene()
+{
+	if (mForcedScene == NULL) {
+		return (sceneItemEnum)-1;
+	}
+	return mForcedScene->sceneItem;
+}
+
+void sceneManager::removeForcedScene() {
+	mForcedScene->onSceneClosingCallback(sceneResultNone, mForcedScene->context, mForcedScene->scene);
+	delete mForcedScene;
+	mForcedScene = NULL;
 }
 
 // Private

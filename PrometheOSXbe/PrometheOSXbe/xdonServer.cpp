@@ -1,3 +1,4 @@
+#include "Scenes/sceneManager.h"
 #include "XDON/definitions.h"
 #include "driveManager.h"
 #include "ftpServer.h"
@@ -22,12 +23,16 @@ const DWORD HEAP_MEMORY_ATTRS = MAKE_XALLOC_ATTRIBUTES(
 namespace
 {
 	bool mStopRequested;
-	LONG connectedClients; // TODO Shut down other services that access the HDD
+	LONG mConnectedClients; // TODO Shut down other services that access the HDD
 	HANDLE mServerThreadHandle;
-	uint64_t sListenSock;
-	uint64_t sIdSock;
-	xdonServer::XDONClientData fakeClientData;
-	DeviceInfo devices[] = {
+	uint64_t mListenSock;
+	uint64_t mIdSock;
+	HANDLE mBytesReadLock;
+	uint64_t mBytesRead;
+	HANDLE mBytesWrittenLock;
+	uint64_t mBytesWritten;
+	xdonServer::XDONClientData mFakeClientData;
+	DeviceInfo mDevices[] = {
 		{"\\Device\\Harddisk0\\partition0", INVALID_HANDLE_VALUE, NULL},
 		{"\\Device\\Harddisk1\\partition0", INVALID_HANDLE_VALUE, NULL},
 		{"\\Device\\MU_0", INVALID_HANDLE_VALUE, NULL},
@@ -47,7 +52,7 @@ namespace
 // https://www.cs.uaf.edu/2017/fall/cs301/lecture/10_06_string_inst.html
 bool isZero(uint8_t* buffer, int len) {
 	uint8_t isZero;
-	__asm { 
+	__asm {
 		mov edi, buffer
 			mov ecx, len
 			mov al, 0
@@ -58,33 +63,55 @@ bool isZero(uint8_t* buffer, int len) {
 }
 
 bool xdonServer::hasConnectedClients() {
-	int clients = InterlockedCompareExchange(&connectedClients, 0, 0);
+	int clients = InterlockedCompareExchange(&mConnectedClients, 0, 0);
 	return clients != 0;
+}
+
+int xdonServer::connectedClients() {
+	return InterlockedCompareExchange(&mConnectedClients, 0, 0);
+}
+
+unsigned long long xdonServer::bytesRead()
+{
+	uint64_t bytesRead;
+	WaitForSingleObject(mBytesReadLock, INFINITE);
+	bytesRead = mBytesRead;
+	ReleaseMutex(mBytesReadLock);
+	return bytesRead;
+}
+
+unsigned long long xdonServer::bytesWritten()
+{
+	uint64_t bytesWritten;
+	WaitForSingleObject(mBytesWrittenLock, INFINITE);
+	bytesWritten = mBytesWritten;
+	ReleaseMutex(mBytesWrittenLock);
+	return bytesWritten;
 }
 
 bool WINAPI xdonServer::serverThread(LPVOID lParam)
 {
-	const timeval timeout = {0, 0};
+	const timeval timeout = {0, 50000};
 	fd_set fds;
 	int result;
 	struct sockaddr_in sender;
-	fakeClientData.sock = (SOCKET)sIdSock;
-	fakeClientData.requestMemory = (uint8_t *)XMemAlloc(XDON_REQ_MEM_SIZE, PHYSICAL_MEMORY_ATTRS);
-	fakeClientData.responseMemory = (uint8_t *)XMemAlloc(XDON_RSP_MEM_SIZE, PHYSICAL_MEMORY_ATTRS);
+	mFakeClientData.sock = (SOCKET)mIdSock;
+	mFakeClientData.requestMemory = (uint8_t *)XMemAlloc(XDON_REQ_MEM_SIZE, PHYSICAL_MEMORY_ATTRS);
+	mFakeClientData.responseMemory = (uint8_t *)XMemAlloc(XDON_RSP_MEM_SIZE, PHYSICAL_MEMORY_ATTRS);
 	while (mStopRequested == false)
 	{
 		FD_ZERO(&fds);
-		FD_SET((SOCKET)sIdSock, &fds);
-		FD_SET((SOCKET)sListenSock, &fds);
-		result = select((int)max(sIdSock, sListenSock) + 1, &fds, NULL, NULL, &timeout);
+		FD_SET((SOCKET)mIdSock, &fds);
+		FD_SET((SOCKET)mListenSock, &fds);
+		result = select((int)max(mIdSock, mListenSock) + 1, &fds, NULL, NULL, &timeout);
 		if (result == SOCKET_ERROR)
 		{
 			utils::debugPrint("Error waiting for sockets: %i\n", WSAGetLastError());
 			break;
 		}
-		if (FD_ISSET(sListenSock, &fds))
+		if (FD_ISSET(mListenSock, &fds))
 		{
-			result = accept((SOCKET)sListenSock, NULL, NULL);
+			result = accept((SOCKET)mListenSock, NULL, NULL);
 			if (result == INVALID_SOCKET)
 			{
 				continue;
@@ -124,36 +151,33 @@ bool WINAPI xdonServer::serverThread(LPVOID lParam)
 				socketUtility::closeSocket(clientSock);
 				continue;
 			}
-			SetThreadPriority(clientHandler, THREAD_PRIORITY_ABOVE_NORMAL);
+			SetThreadPriority(clientHandler, THREAD_PRIORITY_HIGHEST);
 			CloseHandle(clientHandler);
 			continue;
 		}
-		else if (FD_ISSET(sIdSock, &fds))
+		else if (FD_ISSET(mIdSock, &fds))
 		{
-			result = receiveAndValidateRequest(&fakeClientData, &sender, sizeof(sender));
+			result = processRequest(&mFakeClientData, &sender, sizeof(sender));
 			if (result < 0)
 			{
-				XDONResponse *response = (XDONResponse *)fakeClientData.responseMemory;
+				XDONResponse *response = (XDONResponse *)mFakeClientData.responseMemory;
 				response->identifier = XDON_RSP_FRAME_IDENTIFIER;
 				response->version = XDON_PROTOCOL_VERSION;
 				response->consoleType = XDON_CONSOLE_TYPE;
 				response->statusCode = result;
-				result = networkSendUDP((SOCKET)sIdSock, (uint8_t *)response, sizeof(XDONResponse), &sender);
+				result = networkSendUDP((SOCKET)mIdSock, (uint8_t *)response, sizeof(XDONResponse), &sender);
 				if (result < 0)
 				{
 					utils::debugPrint("Error sending validation failure response: %i\n", WSAGetLastError());
 				}
 				continue;
 			}
-			processRequest(&fakeClientData, &sender, sizeof(sender), (XDONCommand)result);
-			continue;
 		}
-		Sleep(50);
 	}
-	socketUtility::closeSocket(sIdSock);
-	socketUtility::closeSocket(sListenSock);
-	XMemFree(fakeClientData.requestMemory, PHYSICAL_MEMORY_ATTRS);
-	XMemFree(fakeClientData.responseMemory, PHYSICAL_MEMORY_ATTRS);
+	socketUtility::closeSocket(mIdSock);
+	socketUtility::closeSocket(mListenSock);
+	XMemFree(mFakeClientData.requestMemory, PHYSICAL_MEMORY_ATTRS);
+	XMemFree(mFakeClientData.responseMemory, PHYSICAL_MEMORY_ATTRS);
 	return false;
 }
 
@@ -161,9 +185,9 @@ bool WINAPI xdonServer::clientThread(LPVOID lParam)
 {
 	XDONClientData *clientData = (XDONClientData *)lParam;
 	// This could be racy
-	InterlockedIncrement(&connectedClients);
+	InterlockedIncrement(&mConnectedClients);
 	if (ftpServer::hasActiveConnections()) {
-		InterlockedDecrement(&connectedClients);
+		InterlockedDecrement(&mConnectedClients);
 		goto cleanup;
 	} else {
 		// Fine to terminate this late, write is not supported over UDP
@@ -173,10 +197,21 @@ bool WINAPI xdonServer::clientThread(LPVOID lParam)
 		ftpServer::close();
 	}
 	driveManager::unmountAllDrives();
+	if (sceneManager::currentForcedScene() != sceneItemXDONLockout) {
+		sceneManager::forceScene(sceneItemXDONLockout);
+	}
+	const timeval timeout = {0, 16000};
 	int result;
+	fd_set fds;
 	while (mStopRequested == false)
 	{
-		result = receiveAndValidateRequest(clientData, NULL, 0);
+		FD_ZERO(&fds);
+		FD_SET((SOCKET)clientData->sock, &fds);
+		result = select((int)clientData->sock + 1, &fds, NULL, NULL, &timeout);
+		if (!FD_ISSET(clientData->sock, &fds)) {
+			continue;
+		}
+		result = processRequest(clientData, NULL, 0);
 		if (result < 0)
 		{
 			XDONResponse *response = (XDONResponse *)clientData->responseMemory;
@@ -192,7 +227,6 @@ bool WINAPI xdonServer::clientThread(LPVOID lParam)
 			}
 			continue;
 		}
-		processRequest(clientData, NULL, 0, (XDONCommand)result);
 		if (WSAGetLastError() == WSAECONNRESET)
 		{
 			utils::debugPrint("Client disconnected");
@@ -200,8 +234,13 @@ bool WINAPI xdonServer::clientThread(LPVOID lParam)
 		}
 		SwitchToThread();
 	}
-	InterlockedDecrement(&connectedClients);
+	InterlockedDecrement(&mConnectedClients);
+	utils::debugPrint("disconnect! clients: %d\n", connectedClients);
 	if (!hasConnectedClients()) {
+		//if (sceneManager::currentForcedScene() == sceneItemXDONLockout) {
+		//	sceneManager::removeForcedScene();
+		//}
+		utils::debugPrint("last xdon client left, restarting ftp\n");
 		// TODO There's a possibility driveMounter::startThread(true) will be used in the future, must be tracked somehow
 		driveManager::mountAllDrives();
 		ftpServer::init();
@@ -215,14 +254,14 @@ cleanup:
 }
 
 inline bool xdonServer::isDeviceOpen(DeviceIndex device) {
-	return devices[device].mutex != NULL && devices[device].handle != INVALID_HANDLE_VALUE;
+	return mDevices[device].mutex != NULL && mDevices[device].handle != INVALID_HANDLE_VALUE;
 }
 
 NTSTATUS xdonServer::openDevice(DeviceIndex device) {
 	if (device >= XDON_DEVICE_MAX) {
 		return -EINVAL;
 	}
-	struct DeviceInfo* deviceInfo = &devices[device];
+	struct DeviceInfo* deviceInfo = &mDevices[device];
 	if (deviceInfo->mutex == NULL) {
 		deviceInfo->mutex = CreateMutex(NULL, true, NULL);
 	}
@@ -252,26 +291,28 @@ bool xdonServer::init()
 {
 	mStopRequested = false;
 	mServerThreadHandle = NULL;
+	mBytesReadLock = CreateMutex(NULL, false, NULL);
+	mBytesWrittenLock = CreateMutex(NULL, false, NULL);
 
 	struct sockaddr_in saListen;
 	memset(&saListen, 0, sizeof(SOCKADDR_IN));
 	saListen.sin_family = AF_INET;
 	saListen.sin_addr.S_un.S_addr = INADDR_ANY;
 	saListen.sin_port = htons(1000);
-	socketUtility::createSocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, sListenSock);
-	if (!socketUtility::bindSocket(sListenSock, &saListen))
+	socketUtility::createSocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, mListenSock);
+	if (!socketUtility::bindSocket(mListenSock, &saListen))
 	{
-		socketUtility::closeSocket(sListenSock);
+		socketUtility::closeSocket(mListenSock);
 		return false;
 	}
-	socketUtility::listenSocket(sListenSock, SOMAXCONN);
+	socketUtility::listenSocket(mListenSock, SOMAXCONN);
 
-	if (!socketUtility::createSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP, sIdSock))
+	if (!socketUtility::createSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP, mIdSock))
 	{
 		utils::debugPrint("Error creating XDON UDP socket: %i\n", WSAGetLastError());
 		return false;
 	}
-	if (!socketUtility::bindSocket(sIdSock, &saListen))
+	if (!socketUtility::bindSocket(mIdSock, &saListen))
 	{
 		utils::debugPrint("Error binding XDON UDP socket: %i\n", WSAGetLastError());
 		return false;
@@ -286,30 +327,36 @@ bool xdonServer::init()
 
 void xdonServer::close()
 {
+	utils::debugPrint("terminating xdon server\n");
 	if (mServerThreadHandle != NULL) {
 		mStopRequested = true;
 		WaitForSingleObject(mServerThreadHandle, INFINITE);
 		CloseHandle(mServerThreadHandle);
 		for (int i = 0; i < XDON_DEVICE_MAX; i++) {
-			if (devices[i].handle != INVALID_HANDLE_VALUE) {
-				NtClose(devices[i].handle);
-				devices[i].handle = INVALID_HANDLE_VALUE;
+			if (mDevices[i].handle != INVALID_HANDLE_VALUE) {
+				NtClose(mDevices[i].handle);
+				mDevices[i].handle = INVALID_HANDLE_VALUE;
 			}
-			if (devices[i].mutex != NULL) {
-				CloseHandle(devices[i].mutex);
-				devices[i].mutex = NULL;
+			if (mDevices[i].mutex != NULL) {
+				CloseHandle(mDevices[i].mutex);
+				mDevices[i].mutex = NULL;
 			}
 		}
 		mServerThreadHandle = NULL;
 	}
+	CloseHandle(mBytesReadLock);
+	CloseHandle(mBytesWrittenLock);
 }
 
-int xdonServer::receiveAndValidateRequest(XDONClientData *clientData, sockaddr_in *sender, size_t senderSize)
+int xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender, size_t senderSize)
 {
+	int result;
 	XDONRequest *request = (XDONRequest *)clientData->requestMemory;
-	if (networkRead((SOCKET)clientData->sock, (uint8_t *)request, sizeof(XDONRequest), sender) < 0)
+	result = networkRead((SOCKET)clientData->sock, (uint8_t *)request, sizeof(XDONRequest), sender);
+	if (result < 0)
 	{
-		return -1;
+		utils::debugPrint("sock read err %d %d\n", result, WSAGetLastError());
+		return result;
 	}
 	if (request->identifier != XDON_REQ_FRAME_IDENTIFIER)
 	{
@@ -332,7 +379,8 @@ int xdonServer::receiveAndValidateRequest(XDONClientData *clientData, sockaddr_i
 	{
 	case Identify:
 	case GetDevices:
-		return request->command;
+		requestSize = 0;
+		break;
 	case Read:
 		requestSize = sizeof(XDONReadRequest);
 		break;
@@ -352,73 +400,10 @@ int xdonServer::receiveAndValidateRequest(XDONClientData *clientData, sockaddr_i
 		utils::debugPrint("Unknown command: %d!\n", request->command);
 		return -1;
 	}
-	if (networkRead((SOCKET)clientData->sock, clientData->requestMemory, requestSize, sender) < 0)
+	if (requestSize > 0 && networkRead((SOCKET)clientData->sock, clientData->requestMemory, requestSize, sender) < 0)
 	{
 		return -1;
 	}
-	switch (command)
-	{
-	case Read:
-		{
-			XDONReadRequest *request = (XDONReadRequest *)clientData->requestMemory;
-			if (request->device >= XDON_DEVICE_MAX || request->length == 0 || request->length > XDON_MAX_IO_SIZE)
-			{
-				utils::debugPrint("bad read req off=%d len=%d!\n", request->offset, request->length);
-				return -1;
-			}
-			break;
-		}
-	case Write:
-		{
-			XDONWriteRequest *request = (XDONWriteRequest *)clientData->requestMemory;
-			if (request->device >= XDON_DEVICE_MAX || request->length == 0 || request->length > XDON_MAX_IO_SIZE)
-			{
-				utils::debugPrint("bad write req off=%d len=%d!\n", request->offset, request->length);
-				return -1;
-			}
-			if (networkRead((SOCKET)clientData->sock, request->data, request->length, sender) < 0)
-			{
-				utils::debugPrint("err read wdata\n", request->offset, request->length);
-				return -1;
-			}
-			break;
-		}
-	case WriteSame:
-		{
-			XDONWriteSameRequest *request = (XDONWriteSameRequest *)clientData->requestMemory;
-			if (request->device >= XDON_DEVICE_MAX || request->length == 0 || request->length > XDON_MAX_IO_SIZE)
-			{
-				utils::debugPrint("bad write same req off=%d val=%d len=%d!\n", request->offset, request->value, request->length);
-				return -1;
-			}
-			break;
-		}
-	case ATACommand:
-		{
-			XDONATACommandRequest *request = (XDONATACommandRequest *)clientData->requestMemory;
-			if (request->length > XDON_MAX_IO_SIZE)
-			{
-				return -1;
-			}
-			if (request->hasOutgoingData && request->length > 0)
-			{
-				if (networkRead((SOCKET)clientData->sock, request->data, request->length, sender) < 0)
-				{
-					return -1;
-				}
-			}
-			break;
-		}
-	case RebootShutdown:
-		break;
-	default: // Unreachable
-		return -1;
-	}
-	return command;
-}
-
-void xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender, size_t senderSize, XDONCommand command)
-{
 	int offset = sizeof(XDONResponse);
 	XDONResponse *response = (XDONResponse *)clientData->responseMemory;
 	response->identifier = XDON_RSP_FRAME_IDENTIFIER;
@@ -453,7 +438,12 @@ void xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender,
 		}
 	case Read:
 		{
-			XDONReadRequest *request = (XDONReadRequest*)clientData->requestMemory;
+			XDONReadRequest *request = (XDONReadRequest *)clientData->requestMemory;
+			if (request->device >= XDON_DEVICE_MAX || request->length == 0 || request->length > XDON_MAX_IO_SIZE)
+			{
+				utils::debugPrint("bad read req off=%d len=%d!\n", request->offset, request->length);
+				return -1;
+			}
 			XDONReadResponse *payload = (XDONReadResponse *)(clientData->responseMemory + offset);
 			offset += sizeof(XDONReadResponse);
 			memset(payload, 0, sizeof(XDONReadResponse));
@@ -470,7 +460,17 @@ void xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender,
 		}
 	case Write:
 		{
-			XDONWriteRequest *request = (XDONWriteRequest*)clientData->requestMemory;
+			XDONWriteRequest *request = (XDONWriteRequest *)clientData->requestMemory;
+			if (request->device >= XDON_DEVICE_MAX || request->length == 0 || request->length > XDON_MAX_IO_SIZE)
+			{
+				utils::debugPrint("bad write req off=%d len=%d!\n", request->offset, request->length);
+				return -1;
+			}
+			if (networkRead((SOCKET)clientData->sock, request->data, request->length, sender) < 0)
+			{
+				utils::debugPrint("err read wdata\n", request->offset, request->length);
+				return -1;
+			}
 			response->statusCode = writeDevice((DeviceIndex)request->device, request->offset, request->data, request->length);
 			if (response->statusCode < 0) {
 				utils::debugPrint("write status ERR=%d off=%d len=%d\n", response->statusCode, request->offset, request->length);
@@ -479,7 +479,12 @@ void xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender,
 		}
 	case WriteSame:
 		{
-			XDONWriteSameRequest *request = (XDONWriteSameRequest*)clientData->requestMemory;
+			XDONWriteSameRequest *request = (XDONWriteSameRequest *)clientData->requestMemory;
+			if (request->device >= XDON_DEVICE_MAX || request->length == 0 || request->length > XDON_MAX_IO_SIZE)
+			{
+				utils::debugPrint("bad write same req off=%d val=%d len=%d!\n", request->offset, request->value, request->length);
+				return -1;
+			}
 			uint8_t value = request->value;
 			int size = request->length;
 			uint64_t offset = request->offset;
@@ -489,7 +494,18 @@ void xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender,
 		}
 	case ATACommand:
 		{
-			XDONATACommandRequest* request = (XDONATACommandRequest*)clientData->requestMemory;
+			XDONATACommandRequest *request = (XDONATACommandRequest *)clientData->requestMemory;
+			if (request->length > XDON_MAX_IO_SIZE)
+			{
+				return -1;
+			}
+			if (request->hasOutgoingData && request->length > 0)
+			{
+				if (networkRead((SOCKET)clientData->sock, request->data, request->length, sender) < 0)
+				{
+					return -1;
+				}
+			}
 			XDONATACommandResponse* payload = (XDONATACommandResponse*)clientData->responseMemory;
 			offset += sizeof(XDONATACommandResponse);
 			memset(payload, 0, sizeof(XDONATACommandResponse));
@@ -498,7 +514,7 @@ void xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender,
 			ataPassthrough.DataBuffer = request->hasOutgoingData ? request->data : payload->data;
 			ataPassthrough.DataBufferSize = request->length;
 			IO_STATUS_BLOCK ioStatusBlock;
-			response->statusCode = NtDeviceIoControlFile(devices[XDON_DEVICE_HARD_DISK_0].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_IDE_PASS_THROUGH, &ataPassthrough, sizeof(ataPassthrough), &ataPassthrough, sizeof(ataPassthrough));
+			response->statusCode = NtDeviceIoControlFile(mDevices[XDON_DEVICE_HARD_DISK_0].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_IDE_PASS_THROUGH, &ataPassthrough, sizeof(ataPassthrough), &ataPassthrough, sizeof(ataPassthrough));
 			if (response->statusCode >= 0) {
 				memcpy(&payload->registers, &ataPassthrough.IdeReg, sizeof(ataPassthrough.IdeReg));
 				offset += request->hasOutgoingData ? 0 : request->length;
@@ -506,8 +522,8 @@ void xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender,
 			break;
 		}
 	case RebootShutdown:
-		{
-			/* PXDON_COMMAND_REBOOT_SHUTDOWN_CONSOLE_REQUEST request = (PXDON_COMMAND_REBOOT_SHUTDOWN_CONSOLE_REQUEST)ThreadParam->Memories.RequestMemory;
+	{
+		/* PXDON_COMMAND_REBOOT_SHUTDOWN_CONSOLE_REQUEST request = (PXDON_COMMAND_REBOOT_SHUTDOWN_CONSOLE_REQUEST)ThreadParam->Memories.RequestMemory;
 			Print(PRINT_VERBOSITY_FLAG_REQUESTS, "FulfillRequest (%X): Fulfilling XDON_COMMAND_REBOOT_SHUTDOWN_CONSOLE.", ThreadParam->ClientSocket);
 			frame.StatusCode = STATUS_SUCCESS;
 
@@ -517,26 +533,26 @@ void xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender,
 			//Let's use max to determine whether to shutdown. There is no other valid use for it so we can use it to keep the command the same as the Xbox 360 version.
 			if ((FIRMWARE_REENTRY)request->Routine == HalMaximumRoutine) HalInitiateShutdown();
 			else HalReturnToFirmware((FIRMWARE_REENTRY)request->Routine);*/
-			break;
-		}
-	default:
-		utils::debugPrint("!! TODO !! Command %d\n", command);
 		break;
 	}
-	if (sender != NULL)
-	{
+	default: // Unreachable
+		return -1;
+	}
+	if (sender == NULL) {
+		if (networkSendTCP((SOCKET)clientData->sock, clientData->responseMemory, offset) < 0)
+		{
+			utils::debugPrint("Error sending response to the client: %i\n", WSAGetLastError());
+		}
+	} else {
 		if (networkSendUDP((SOCKET)clientData->sock, clientData->responseMemory, offset, sender) < 0)
 		{
 			utils::debugPrint("Error sending UDP response to the client: %i\n", WSAGetLastError());
 		}
 	}
-	else if (networkSendTCP((SOCKET)clientData->sock, clientData->responseMemory, offset) < 0)
-	{
-		utils::debugPrint("Error sending response to the client: %i\n", WSAGetLastError());
-	}
+	return 0;
 }
 
-int xdonServer::networkRead(SOCKET sock, uint8_t *outBuf, int outBufSize, struct sockaddr_in *sender)
+inline int xdonServer::networkRead(SOCKET sock, uint8_t *outBuf, int outBufSize, struct sockaddr_in *sender)
 {
 	int recvSize = 0;
 	int result, fromLen = sizeof(*sender);
@@ -545,14 +561,14 @@ int xdonServer::networkRead(SOCKET sock, uint8_t *outBuf, int outBufSize, struct
 		result = recvfrom(sock, (char *)(outBuf + recvSize), outBufSize - recvSize, 0, (struct sockaddr *)sender, &fromLen);
 		if (result < 0)
 		{
-			return result;
+			return -WSAGetLastError();
 		}
 		recvSize += (size_t)result;
 	}
-	return 0;
+	return recvSize;
 }
 
-int xdonServer::networkSendUDP(SOCKET sock, uint8_t *buffer, int bufferLen, struct sockaddr_in *sender)
+inline int xdonServer::networkSendUDP(SOCKET sock, uint8_t *buffer, int bufferLen, struct sockaddr_in *sender)
 {
 	if (sender == NULL)
 	{
@@ -576,7 +592,7 @@ int xdonServer::networkSendUDP(SOCKET sock, uint8_t *buffer, int bufferLen, stru
 	return 0;
 }
 
-int xdonServer::networkSendTCP(SOCKET sock, uint8_t *buffer, int bufferLen)
+inline int xdonServer::networkSendTCP(SOCKET sock, uint8_t *buffer, int bufferLen)
 {
 	int sentLen = 0, result;
 	while (sentLen < bufferLen)
@@ -600,7 +616,7 @@ void xdonServer::getDevices(XDONDevices *payload)
 				continue;
 			}
 		}
-		while (WaitForSingleObject(devices[i].mutex, 250) != WAIT_OBJECT_0) {
+		while (WaitForSingleObject(mDevices[i].mutex, 250) != WAIT_OBJECT_0) {
 			SwitchToThread();
 		}
 	}
@@ -628,9 +644,9 @@ void xdonServer::getDevices(XDONDevices *payload)
 		memoryUnits[i + 1] = status >= 0;
 	}
 	IO_STATUS_BLOCK ioStatusBlock;
-	if (devices[XDON_DEVICE_HARD_DISK_0].handle != INVALID_HANDLE_VALUE)
+	if (mDevices[XDON_DEVICE_HARD_DISK_0].handle != INVALID_HANDLE_VALUE)
 	{
-		status = NtDeviceIoControlFile(devices[XDON_DEVICE_HARD_DISK_0].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->hardDrive0Geometry, sizeof(DISK_GEOMETRY));
+		status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_HARD_DISK_0].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->hardDrive0Geometry, sizeof(DISK_GEOMETRY));
 		if (status >= 0)
 		{
 			payload->availableDevices.hardDrive0 = true;
@@ -639,7 +655,7 @@ void xdonServer::getDevices(XDONDevices *payload)
 			ataPassthrough.IdeReg.bCommandReg = IDE_COMMAND_IDENTIFY_DEVICE;
 			ataPassthrough.DataBuffer = &payload->hardDrive0Info;
 			ataPassthrough.DataBufferSize = sizeof(payload->hardDrive0Info);
-			status = NtDeviceIoControlFile(devices[XDON_DEVICE_HARD_DISK_0].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_IDE_PASS_THROUGH, &ataPassthrough, sizeof(ataPassthrough), &ataPassthrough, sizeof(ataPassthrough));
+			status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_HARD_DISK_0].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_IDE_PASS_THROUGH, &ataPassthrough, sizeof(ataPassthrough), &ataPassthrough, sizeof(ataPassthrough));
 			if (status >= 0)
 			{
 				payload->hardDrive0InfoAvailable = true;
@@ -647,13 +663,13 @@ void xdonServer::getDevices(XDONDevices *payload)
 		}
 		else
 		{
-			NtClose(devices[XDON_DEVICE_HARD_DISK_0].handle);
-			devices[XDON_DEVICE_HARD_DISK_0].handle = INVALID_HANDLE_VALUE;
+			NtClose(mDevices[XDON_DEVICE_HARD_DISK_0].handle);
+			mDevices[XDON_DEVICE_HARD_DISK_0].handle = INVALID_HANDLE_VALUE;
 		}
 	}
-	if (devices[XDON_DEVICE_HARD_DISK_1].handle != INVALID_HANDLE_VALUE)
+	if (mDevices[XDON_DEVICE_HARD_DISK_1].handle != INVALID_HANDLE_VALUE)
 	{
-		status = NtDeviceIoControlFile(devices[XDON_DEVICE_HARD_DISK_1].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->hardDrive1Geometry, sizeof(DISK_GEOMETRY));
+		status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_HARD_DISK_1].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->hardDrive1Geometry, sizeof(DISK_GEOMETRY));
 		if (status >= 0)
 		{
 			payload->availableDevices.hardDrive1 = true;
@@ -662,7 +678,7 @@ void xdonServer::getDevices(XDONDevices *payload)
 			ataPassthrough.IdeReg.bCommandReg = IDE_COMMAND_IDENTIFY_DEVICE;
 			ataPassthrough.DataBuffer = &payload->hardDrive1Info;
 			ataPassthrough.DataBufferSize = sizeof(payload->hardDrive1Info);
-			status = NtDeviceIoControlFile(devices[XDON_DEVICE_HARD_DISK_1].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_IDE_PASS_THROUGH, &ataPassthrough, sizeof(ataPassthrough), &ataPassthrough, sizeof(ataPassthrough));
+			status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_HARD_DISK_1].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_IDE_PASS_THROUGH, &ataPassthrough, sizeof(ataPassthrough), &ataPassthrough, sizeof(ataPassthrough));
 			if (status >= 0)
 			{
 				payload->hardDrive1InfoAvailable = true;
@@ -670,43 +686,43 @@ void xdonServer::getDevices(XDONDevices *payload)
 		}
 		else
 		{
-			NtClose(devices[XDON_DEVICE_HARD_DISK_1].handle);
-			devices[XDON_DEVICE_HARD_DISK_1].handle = INVALID_HANDLE_VALUE;
+			NtClose(mDevices[XDON_DEVICE_HARD_DISK_1].handle);
+			mDevices[XDON_DEVICE_HARD_DISK_1].handle = INVALID_HANDLE_VALUE;
 		}
 	}
-	status = NtDeviceIoControlFile(devices[XDON_DEVICE_MU0].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit0Geometry, sizeof(DISK_GEOMETRY));
+	status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_MU0].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit0Geometry, sizeof(DISK_GEOMETRY));
 	payload->availableDevices.memoryUnit0 = status >= 0;
-	status = NtDeviceIoControlFile(devices[XDON_DEVICE_MU1].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit1Geometry, sizeof(DISK_GEOMETRY));
+	status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_MU1].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit1Geometry, sizeof(DISK_GEOMETRY));
 	payload->availableDevices.memoryUnit1 = status >= 0;
-	status = NtDeviceIoControlFile(devices[XDON_DEVICE_MU2].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit2Geometry, sizeof(DISK_GEOMETRY));
+	status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_MU2].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit2Geometry, sizeof(DISK_GEOMETRY));
 	payload->availableDevices.memoryUnit2 = status >= 0;
-	status = NtDeviceIoControlFile(devices[XDON_DEVICE_MU3].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit3Geometry, sizeof(DISK_GEOMETRY));
+	status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_MU3].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit3Geometry, sizeof(DISK_GEOMETRY));
 	payload->availableDevices.memoryUnit3 = status >= 0;
-	status = NtDeviceIoControlFile(devices[XDON_DEVICE_MU4].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit4Geometry, sizeof(DISK_GEOMETRY));
+	status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_MU4].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit4Geometry, sizeof(DISK_GEOMETRY));
 	payload->availableDevices.memoryUnit4 = status >= 0;
-	status = NtDeviceIoControlFile(devices[XDON_DEVICE_MU5].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit5Geometry, sizeof(DISK_GEOMETRY));
+	status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_MU5].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit5Geometry, sizeof(DISK_GEOMETRY));
 	payload->availableDevices.memoryUnit5 = status >= 0;
-	status = NtDeviceIoControlFile(devices[XDON_DEVICE_MU6].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit6Geometry, sizeof(DISK_GEOMETRY));
+	status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_MU6].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit6Geometry, sizeof(DISK_GEOMETRY));
 	payload->availableDevices.memoryUnit6 = status >= 0;
-	status = NtDeviceIoControlFile(devices[XDON_DEVICE_MU7].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit7Geometry, sizeof(DISK_GEOMETRY));
+	status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_MU7].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &payload->memoryUnit7Geometry, sizeof(DISK_GEOMETRY));
 	payload->availableDevices.memoryUnit7 = status >= 0;
-	if (devices[10].handle != INVALID_HANDLE_VALUE)
+	if (mDevices[10].handle != INVALID_HANDLE_VALUE)
 	{
-		status = NtDeviceIoControlFile(devices[XDON_DEVICE_DVDROM].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_CDROM_GET_DRIVE_GEOMETRY, NULL, 0, &payload->dvdRomGeometry, sizeof(DISK_GEOMETRY));
+		status = NtDeviceIoControlFile(mDevices[XDON_DEVICE_DVDROM].handle, NULL, NULL, NULL, &ioStatusBlock, IOCTL_CDROM_GET_DRIVE_GEOMETRY, NULL, 0, &payload->dvdRomGeometry, sizeof(DISK_GEOMETRY));
 		payload->availableDevices.dvdRom = status >= 0;
 		if (!payload->availableDevices.dvdRom)
 		{
-			NtClose(devices[10].handle);
-			devices[10].handle = INVALID_HANDLE_VALUE;
+			NtClose(mDevices[10].handle);
+			mDevices[10].handle = INVALID_HANDLE_VALUE;
 		}
 	}
 	for (int i = 0; i < 11; i++)
 	{
-		ReleaseMutex(devices[i].mutex);
+		ReleaseMutex(mDevices[i].mutex);
 	}
 }
 
-int xdonServer::readDevice(DeviceIndex device, uint64_t offset_, uint8_t *buffer, int bufferLen)
+inline int xdonServer::readDevice(DeviceIndex device, uint64_t offset_, uint8_t *buffer, int bufferLen)
 {
 	NTSTATUS status;
 	if (device > XDON_DEVICE_MAX)
@@ -721,19 +737,22 @@ int xdonServer::readDevice(DeviceIndex device, uint64_t offset_, uint8_t *buffer
 			return status;
 		}
 	}
-	struct DeviceInfo* deviceInfo = &devices[device];
-	while (WaitForSingleObject(devices[device].mutex, 250) != WAIT_OBJECT_0) {
+	struct DeviceInfo* deviceInfo = &mDevices[device];
+	while (WaitForSingleObject(mDevices[device].mutex, 250) != WAIT_OBJECT_0) {
 		SwitchToThread();
 	}
 	IO_STATUS_BLOCK ioStatusBlock;
 	LARGE_INTEGER offset;
 	offset.QuadPart = offset_;
-	status = NtReadFile(devices[device].handle, NULL, NULL, NULL, &ioStatusBlock, buffer, bufferLen, &offset);
-	ReleaseMutex(devices[device].mutex);
+	status = NtReadFile(mDevices[device].handle, NULL, NULL, NULL, &ioStatusBlock, buffer, bufferLen, &offset);
+	ReleaseMutex(mDevices[device].mutex);
+	WaitForSingleObject(mBytesReadLock, INFINITE);
+	mBytesRead += (uint64_t)ioStatusBlock.Information;
+	ReleaseMutex(mBytesReadLock);
 	return status;
 }
 
-int xdonServer::writeDevice(DeviceIndex device, uint64_t offset_, uint8_t *buffer, int bufferLen)
+inline int xdonServer::writeDevice(DeviceIndex device, uint64_t offset_, uint8_t *buffer, int bufferLen)
 {
 	NTSTATUS status;
 	if (device > XDON_DEVICE_MAX)
@@ -750,10 +769,13 @@ int xdonServer::writeDevice(DeviceIndex device, uint64_t offset_, uint8_t *buffe
 	IO_STATUS_BLOCK ioStatusBlock;
 	LARGE_INTEGER offset;
 	offset.QuadPart = offset_;
-	while (WaitForSingleObject(devices[device].mutex, 250) != WAIT_OBJECT_0) {
+	while (WaitForSingleObject(mDevices[device].mutex, 250) != WAIT_OBJECT_0) {
 		SwitchToThread();
 	}
-	status = NtWriteFile(devices[device].handle, NULL, NULL, NULL, &ioStatusBlock, buffer, bufferLen, &offset);
-	ReleaseMutex(devices[device].mutex);
+	status = NtWriteFile(mDevices[device].handle, NULL, NULL, NULL, &ioStatusBlock, buffer, bufferLen, &offset);
+	ReleaseMutex(mDevices[device].mutex);
+	WaitForSingleObject(mBytesWrittenLock, INFINITE);
+	mBytesWritten += (uint64_t)ioStatusBlock.Information;
+	ReleaseMutex(mBytesWrittenLock);
 	return status;
 }

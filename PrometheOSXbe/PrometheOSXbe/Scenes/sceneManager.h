@@ -62,6 +62,7 @@ enum sceneItemEnum
 	sceneItemFormatDriveSecondaryScene,
 	sceneItemLauncherFlowScene,
 	sceneItemDlcSignerScene,
+	sceneItemXDONLockout,
 }; 
 
 typedef void (*SceneOnClosingCallback)(sceneResult result, void* context, scene* scene);
@@ -98,6 +99,9 @@ public:
 	static void pushScene(sceneItemEnum sceneItem);
 	static void pushScene(sceneContainer* container);
 	static void popScene(sceneResult result = sceneResultNone);
+	static void forceScene(sceneItemEnum forcedSceneItem);
+	static sceneItemEnum currentForcedScene();
+	static void removeForcedScene();
 private:
 	static void addScene(sceneContainer* sceneContainer);
 };

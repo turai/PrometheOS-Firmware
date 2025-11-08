@@ -365,10 +365,10 @@ int stringUtility::hexCharToInt(char c)
     }
 }
 
-char* stringUtility::formatSize(uint32_t size)
+char* stringUtility::formatSize(uint64_t size)
 {
-    const uint32_t KB = 1024;
-    const uint32_t MB = KB * KB;
+    const uint64_t KB = 1024;
+    const uint64_t MB = KB * KB;
     if (size < KB) {
 		return formatString("%luB", size);
     } else if (size < MB) {
