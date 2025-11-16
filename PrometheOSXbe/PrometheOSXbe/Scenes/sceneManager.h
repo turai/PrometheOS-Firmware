@@ -95,13 +95,13 @@ typedef struct sceneContainer
 class sceneManager
 {
 public:
+	static void lock();
+	static void unlock();
 	static scene* getScene();
+	static sceneItemEnum getSceneItem();
 	static void pushScene(sceneItemEnum sceneItem);
 	static void pushScene(sceneContainer* container);
 	static void popScene(sceneResult result = sceneResultNone);
-	static void forceScene(sceneItemEnum forcedSceneItem);
-	static sceneItemEnum currentForcedScene();
-	static void removeForcedScene();
 private:
 	static void addScene(sceneContainer* sceneContainer);
 };

@@ -117,10 +117,8 @@ bool WINAPI xdonServer::serverThread(LPVOID lParam)
 				continue;
 			}
 			uint64_t clientSock = result;
-			int timeout = 0;
-			setsockopt((SOCKET)clientSock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof(timeout));
-			setsockopt((SOCKET)clientSock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
-
+			u_long value = 1;
+			ioctlsocket((SOCKET)clientSock, FIONBIO, &value);
 			XDONClientData *clientData = (XDONClientData *)XMemAlloc(sizeof(XDONClientData), HEAP_MEMORY_ATTRS);
 			if (clientData == NULL)
 			{
@@ -157,6 +155,13 @@ bool WINAPI xdonServer::serverThread(LPVOID lParam)
 		}
 		else if (FD_ISSET(mIdSock, &fds))
 		{
+			XDONRequest *request = (XDONRequest *)mFakeClientData.requestMemory;
+			result = networkRead((SOCKET)mFakeClientData.sock, (uint8_t *)request, sizeof(XDONRequest), &sender);
+			if (result < 0)
+			{
+				utils::debugPrint("UDP sock read err %d %d\n", result, WSAGetLastError());
+				return result;
+			}
 			result = processRequest(&mFakeClientData, &sender, sizeof(sender));
 			if (result < 0)
 			{
@@ -197,19 +202,24 @@ bool WINAPI xdonServer::clientThread(LPVOID lParam)
 		ftpServer::close();
 	}
 	driveManager::unmountAllDrives();
-	if (sceneManager::currentForcedScene() != sceneItemXDONLockout) {
-		sceneManager::forceScene(sceneItemXDONLockout);
+	sceneManager::lock();
+	if (sceneManager::getSceneItem() != sceneItemXDONLockout) {
+		sceneManager::pushScene(sceneItemXDONLockout);
 	}
-	const timeval timeout = {0, 16000};
+	sceneManager::unlock();
 	int result;
 	fd_set fds;
+	fd_set xfds;
 	while (mStopRequested == false)
 	{
-		FD_ZERO(&fds);
-		FD_SET((SOCKET)clientData->sock, &fds);
-		result = select((int)clientData->sock + 1, &fds, NULL, NULL, &timeout);
-		if (!FD_ISSET(clientData->sock, &fds)) {
+		XDONRequest *request = (XDONRequest *)clientData->requestMemory;
+		result = networkReadTCP((SOCKET)clientData->sock, (uint8_t *)request, sizeof(XDONRequest));
+		if (result == -WAIT_TIMEOUT) {
 			continue;
+		}
+		if (result < 0)
+		{
+			goto cleanup;
 		}
 		result = processRequest(clientData, NULL, 0);
 		if (result < 0)
@@ -234,18 +244,24 @@ bool WINAPI xdonServer::clientThread(LPVOID lParam)
 		}
 		SwitchToThread();
 	}
+cleanup:
 	InterlockedDecrement(&mConnectedClients);
-	utils::debugPrint("disconnect! clients: %d\n", connectedClients);
 	if (!hasConnectedClients()) {
-		//if (sceneManager::currentForcedScene() == sceneItemXDONLockout) {
-		//	sceneManager::removeForcedScene();
-		//}
-		utils::debugPrint("last xdon client left, restarting ftp\n");
+		WaitForSingleObject(mBytesReadLock, INFINITE);
+		mBytesRead = 0;
+		ReleaseMutex(mBytesReadLock);
+		WaitForSingleObject(mBytesWrittenLock, INFINITE);
+		mBytesWritten = 0;
+		ReleaseMutex(mBytesWrittenLock);
+		sceneManager::lock();
+		if (sceneManager::getSceneItem() == sceneItemXDONLockout) {
+			sceneManager::popScene(sceneResultNone);
+		}
+		sceneManager::unlock();
 		// TODO There's a possibility driveMounter::startThread(true) will be used in the future, must be tracked somehow
 		driveManager::mountAllDrives();
 		ftpServer::init();
 	}
-cleanup:
 	socketUtility::closeSocket(clientData->sock);
 	XMemFree(clientData->requestMemory, PHYSICAL_MEMORY_ATTRS);
 	XMemFree(clientData->responseMemory, PHYSICAL_MEMORY_ATTRS);
@@ -350,28 +366,21 @@ void xdonServer::close()
 
 int xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender, size_t senderSize)
 {
-	int result;
 	XDONRequest *request = (XDONRequest *)clientData->requestMemory;
-	result = networkRead((SOCKET)clientData->sock, (uint8_t *)request, sizeof(XDONRequest), sender);
-	if (result < 0)
-	{
-		utils::debugPrint("sock read err %d %d\n", result, WSAGetLastError());
-		return result;
-	}
 	if (request->identifier != XDON_REQ_FRAME_IDENTIFIER)
 	{
 		utils::debugPrint("Invalid frame identifier received!\n");
-		return -1;
+		return -EINVAL;
 	}
 	if (request->version != XDON_PROTOCOL_VERSION)
 	{
 		utils::debugPrint("Unsupported XDON protocol!\n");
-		return -1;
+		return -EINVAL;
 	}
 	if (sender != NULL && request->command != Identify)
 	{
 		utils::debugPrint("UDP only supports identify commands!\n");
-		return -1;
+		return -EINVAL;
 	}
 	int requestSize;
 	uint8_t command = request->command;
@@ -400,7 +409,7 @@ int xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender, 
 		utils::debugPrint("Unknown command: %d!\n", request->command);
 		return -1;
 	}
-	if (requestSize > 0 && networkRead((SOCKET)clientData->sock, clientData->requestMemory, requestSize, sender) < 0)
+	if (requestSize > 0 && networkReadTCP((SOCKET)clientData->sock, clientData->requestMemory, requestSize) < 0)
 	{
 		return -1;
 	}
@@ -466,7 +475,7 @@ int xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender, 
 				utils::debugPrint("bad write req off=%d len=%d!\n", request->offset, request->length);
 				return -1;
 			}
-			if (networkRead((SOCKET)clientData->sock, request->data, request->length, sender) < 0)
+			if (networkReadTCP((SOCKET)clientData->sock, request->data, request->length) < 0)
 			{
 				utils::debugPrint("err read wdata\n", request->offset, request->length);
 				return -1;
@@ -501,7 +510,7 @@ int xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender, 
 			}
 			if (request->hasOutgoingData && request->length > 0)
 			{
-				if (networkRead((SOCKET)clientData->sock, request->data, request->length, sender) < 0)
+				if (networkReadTCP((SOCKET)clientData->sock, request->data, request->length) < 0)
 				{
 					return -1;
 				}
@@ -523,16 +532,26 @@ int xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender, 
 		}
 	case RebootShutdown:
 	{
-		/* PXDON_COMMAND_REBOOT_SHUTDOWN_CONSOLE_REQUEST request = (PXDON_COMMAND_REBOOT_SHUTDOWN_CONSOLE_REQUEST)ThreadParam->Memories.RequestMemory;
-			Print(PRINT_VERBOSITY_FLAG_REQUESTS, "FulfillRequest (%X): Fulfilling XDON_COMMAND_REBOOT_SHUTDOWN_CONSOLE.", ThreadParam->ClientSocket);
-			frame.StatusCode = STATUS_SUCCESS;
-
-			if (!SockSend(ThreadParam->ClientSocket, &frame, sizeof(frame), NULL, 0, To, ToLen)) Print(PRINT_VERBOSITY_FLAG_ESSENTIAL_AND_ERRORS, "FulfillRequest (%X): Failed to send response: %d", ThreadParam->ClientSocket, WSAGetLastError());
-
-			Print(PRINT_VERBOSITY_FLAG_REQUESTS, "FulfillRequest (%X): Executing routine %d right now.", ThreadParam->ClientSocket, request->Routine);
-			//Let's use max to determine whether to shutdown. There is no other valid use for it so we can use it to keep the command the same as the Xbox 360 version.
-			if ((FIRMWARE_REENTRY)request->Routine == HalMaximumRoutine) HalInitiateShutdown();
-			else HalReturnToFirmware((FIRMWARE_REENTRY)request->Routine);*/
+		// TODO Send response before XDON goes offline
+		XDONRebootShutdownRequest* request = (XDONRebootShutdownRequest*)clientData->requestMemory;
+		response->statusCode = 0;
+		switch (request->action) {
+			case 1:
+				HalReturnToFirmware(RETURN_FIRMWARE_REBOOT);
+				break;
+			case 2:
+				HalReturnToFirmware(RETURN_FIRMWARE_QUICK_REBOOT);
+				break;
+			case 3:
+				HalReturnToFirmware(RETURN_FIRMWARE_HARD);
+				break;
+			case 4:
+				HalReturnToFirmware(RETURN_FIRMWARE_FATAL);
+				break;
+			default:
+				HalReturnToFirmware(RETURN_FIRMWARE_HALT);
+				break;
+		}
 		break;
 	}
 	default: // Unreachable
@@ -552,10 +571,58 @@ int xdonServer::processRequest(XDONClientData *clientData, sockaddr_in *sender, 
 	return 0;
 }
 
+inline int xdonServer::networkReadTCP(SOCKET sock, uint8_t* outBuf, u_long outBufSize)
+{
+	const DWORD FLAGS = 0;
+	int result;
+	u_long lastRecvMs = GetTickCount(), nowMs, cycRcvd = 0, totalRcvd = 0, bytesAvailable;
+	timeval timeout;
+	fd_set rfds, xfds;
+	WSABUF recvBuf;
+	memset(&timeout, 0, sizeof(timeval));
+	do {
+		nowMs = GetTickCount();
+		recvBuf.buf = (char*)outBuf + totalRcvd;
+		recvBuf.len = outBufSize - totalRcvd;
+		ioctlsocket(sock, FIONREAD, &bytesAvailable);
+		if (bytesAvailable == 0) {
+			timeout.tv_usec = 16666;
+			FD_ZERO(&rfds);
+			FD_ZERO(&xfds);
+			FD_SET(sock, &rfds);
+			FD_SET(sock, &xfds);
+			result = select(sock + 1, &rfds, NULL, &xfds, &timeout);
+			if (result == SOCKET_ERROR) {
+				return -WSAGetLastError();
+			}
+			if (FD_ISSET(sock, &xfds)) {
+				return -EPIPE;
+			}
+			if (result == 0 || !FD_ISSET(sock, &rfds)) {
+				if ((nowMs - lastRecvMs) > 2000) {
+					return -WAIT_TIMEOUT;
+				}
+				continue;
+			}
+		}
+		result = WSARecv(sock, &recvBuf, 1, &cycRcvd, (LPDWORD)&FLAGS, NULL, NULL);
+		if (result == SOCKET_ERROR) {
+			return -WSAGetLastError();
+		}
+		if (cycRcvd == 0) {
+			return -EPIPE;
+		}
+		lastRecvMs = GetTickCount();
+		totalRcvd += cycRcvd;
+	} while (totalRcvd < outBufSize);
+	return totalRcvd;
+}
+
 inline int xdonServer::networkRead(SOCKET sock, uint8_t *outBuf, int outBufSize, struct sockaddr_in *sender)
 {
 	int recvSize = 0;
 	int result, fromLen = sizeof(*sender);
+
 	while (recvSize < outBufSize)
 	{
 		result = recvfrom(sock, (char *)(outBuf + recvSize), outBufSize - recvSize, 0, (struct sockaddr *)sender, &fromLen);
@@ -574,7 +641,8 @@ inline int xdonServer::networkSendUDP(SOCKET sock, uint8_t *buffer, int bufferLe
 	{
 		return -1;
 	}
-	if (bufferLen > 1472)
+	// According to XDK docs
+	if (bufferLen > 1304)
 	{
 		utils::debugPrint("Tried to send a huge %d bytes long UDP packet, ignoring.", bufferLen);
 		return -1;
@@ -594,17 +662,29 @@ inline int xdonServer::networkSendUDP(SOCKET sock, uint8_t *buffer, int bufferLe
 
 inline int xdonServer::networkSendTCP(SOCKET sock, uint8_t *buffer, int bufferLen)
 {
-	int sentLen = 0, result;
-	while (sentLen < bufferLen)
-	{
-		result = send(sock, (const char *)(buffer + sentLen), bufferLen - sentLen, 0);
-		if (result < 0)
-		{
-			return result;
+	int result;
+	u_long sentLen = 0, cycSent = 0;
+	fd_set wfds;
+	timeval timeout;
+	WSABUF sendBuf;
+	memset(&timeout, 0, sizeof(timeval));
+	while (sentLen < bufferLen) {
+		sendBuf.buf = (char*)buffer + sentLen;
+		sendBuf.len = bufferLen - sentLen;
+		timeout.tv_usec = 16666;
+		FD_ZERO(&wfds);
+		FD_SET(sock, &wfds);
+		result = select(sock + 1, NULL, &wfds, NULL, &timeout);
+		if (!FD_ISSET(sock, &wfds)) {
+			continue;
 		}
-		sentLen += result;
+		result = WSASend(sock, &sendBuf, 1, &cycSent, 0, NULL, NULL);
+		if (result == SOCKET_ERROR) {
+			return -WSAGetLastError();
+		}
+		sentLen += cycSent;
 	}
-	return 0;
+	return sentLen;
 }
 
 void xdonServer::getDevices(XDONDevices *payload)

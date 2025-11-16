@@ -48,13 +48,10 @@ void xdonLockoutScene::render()
 	yPos += 40;
 	drawing::drawBitmapStringAligned(context::getBitmapFontMedium(), "Don't turn off your console", theme::getTextColor(), horizAlignmentCenter, 40, yPos, 640);
 
-	#define COL_W 190
-	xPos = 60;
-	clients = stringUtility::formatString("Clients: %d", xdonServer::connectedClients());
-	drawing::drawBitmapStringAligned(context::getBitmapFontSmall(), clients, theme::getTextColor(), horizAlignmentLeft, xPos, theme::getFooterY(), COL_W);
-	free(clients);
 
-	xPos += COL_W;
+
+	#define COL_W 260
+	xPos = 60; 
 	bytesFmt = stringUtility::formatSize(xdonServer::bytesRead());
 	bytesRead = stringUtility::formatString("Read: %s", bytesFmt);
 	drawing::drawBitmapStringAligned(context::getBitmapFontSmall(), bytesRead, theme::getTextColor(), horizAlignmentCenter, xPos, theme::getFooterY(), COL_W);

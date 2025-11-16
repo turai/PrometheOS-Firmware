@@ -51,16 +51,26 @@
 namespace 
 {
 	pointerVector<sceneContainer*>* mScenes = new pointerVector<sceneContainer*>(true);
-	sceneContainer* mForcedScene = NULL;
+	HANDLE mManagerLock = CreateMutex(NULL, false, NULL);
+}
+
+void sceneManager::lock() {
+	WaitForSingleObject(mManagerLock, INFINITE);
+}
+
+void sceneManager::unlock() {
+	ReleaseMutex(mManagerLock);
 }
 
 scene* sceneManager::getScene()
 {
-	if (mForcedScene != NULL) {
-		return mForcedScene->scene;
-	}
 	sceneContainer* result = mScenes->get(mScenes->count() - 1);
 	return result->scene;
+}
+
+sceneItemEnum sceneManager::getSceneItem() {
+	sceneContainer* result = mScenes->get(mScenes->count() - 1);
+	return result->sceneItem;
 }
 
 void sceneManager::pushScene(sceneItemEnum sceneItem)
@@ -435,6 +445,11 @@ void sceneManager::pushScene(sceneItemEnum sceneItem)
 		sceneContainer* container = new sceneContainer(sceneItem, new dlcSignerScene(), "DLC / Update Signer");
 		addScene(container);
 	}
+	else if (sceneItem == sceneItemXDONLockout)
+	{
+		sceneContainer* container = new sceneContainer(sceneItem, new xdonLockoutScene(), "XDON Lockout");
+		addScene(container);
+	}
 }
 
 void sceneManager::pushScene(sceneContainer* container)
@@ -468,39 +483,6 @@ void sceneManager::popScene(sceneResult result)
 	}
 
 	context::setCurrentTitle(container->description);
-}
-
-void sceneManager::forceScene(sceneItemEnum forcedSceneItem)
-{
-	if (mForcedScene != NULL) {
-		removeForcedScene();
-	}
-	scene* scene = NULL;
-	const char* description = NULL;
-	switch (forcedSceneItem) {
-		case sceneItemXDONLockout:
-			scene = new xdonLockoutScene();
-			description = "XDON Lockout";
-			break;
-		default:
-			return;
-	}
-	sceneContainer* container = new sceneContainer(forcedSceneItem, scene, description);
-	mForcedScene = container;
-}
-
-sceneItemEnum sceneManager::currentForcedScene()
-{
-	if (mForcedScene == NULL) {
-		return (sceneItemEnum)-1;
-	}
-	return mForcedScene->sceneItem;
-}
-
-void sceneManager::removeForcedScene() {
-	mForcedScene->onSceneClosingCallback(sceneResultNone, mForcedScene->context, mForcedScene->scene);
-	delete mForcedScene;
-	mForcedScene = NULL;
 }
 
 // Private

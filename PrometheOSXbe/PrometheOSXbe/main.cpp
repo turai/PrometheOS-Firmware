@@ -779,6 +779,15 @@ void __cdecl main()
 	httpServer::registerOnPostCallback(onPostCallback);
 	httpServer::registerOnResponseSentCallback(onResponseSentCallback);
 
+	// Make sure the main scene is added before FATXplorer has a chance to connect
+	sceneManager::lock();
+	sceneManager::pushScene(sceneItemMainScene);
+	if (settingsManager::hasAutoBootBank() == true)
+	{
+		sceneManager::pushScene(sceneItemAutoBootScene);
+	}
+	sceneManager::unlock();
+
 	if (deviceCreated == false)
 	{
 		network::init();
@@ -828,12 +837,6 @@ void __cdecl main()
 
 	lcdRender::startThread();
 
-	sceneManager::pushScene(sceneItemMainScene);
-	if (settingsManager::hasAutoBootBank() == true)
-	{
-		sceneManager::pushScene(sceneItemAutoBootScene);
-	}
-
 	char* skinName = settingsManager::getSkinName();
 	theme::loadSkin(skinName);
 	free(skinName);
@@ -856,7 +859,7 @@ void __cdecl main()
 	//uint32_t result = PEProcess::PE_Run("E:\\Root\\plugin.nxe", params);
 	//free(name);
 
-
+	scene* scene;
     while (TRUE)
     {
 		context::getD3dDevice()->BeginScene();
@@ -874,8 +877,11 @@ void __cdecl main()
 
 		refreshInfo();
 
-		sceneManager::getScene()->update();
-		sceneManager::getScene()->render();
+		sceneManager::lock();
+		scene = sceneManager::getScene();
+		scene->update();
+		scene->render();
+		sceneManager::unlock();
 
 		context::getD3dDevice()->EndScene();
 		context::getD3dDevice()->Present(NULL, NULL, NULL, NULL);
