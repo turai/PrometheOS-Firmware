@@ -1,4 +1,6 @@
 #include "Scenes/sceneManager.h"
+#include "Threads/hddFormat.h"
+#include "Threads/hddLockUnlock.h"
 #include "XDON/definitions.h"
 #include "driveManager.h"
 #include "ftpServer.h"
@@ -111,9 +113,19 @@ bool WINAPI xdonServer::serverThread(LPVOID lParam)
 		}
 		if (FD_ISSET(mListenSock, &fds))
 		{
+			if (hddLockUnlock::isActive()) {
+				utils::debugPrint("HDD is being (un)locked, ignoring request from FATXplorer");
+				continue;
+			}
+			if (hddFormat::isActive()) {
+				utils::debugPrint("HDD is being (un)locked, ignoring request from FATXplorer");
+				continue;
+			}
+			InterlockedIncrement(&mConnectedClients);
 			result = accept((SOCKET)mListenSock, NULL, NULL);
 			if (result == INVALID_SOCKET)
 			{
+				InterlockedDecrement(&mConnectedClients);
 				continue;
 			}
 			uint64_t clientSock = result;
@@ -122,6 +134,7 @@ bool WINAPI xdonServer::serverThread(LPVOID lParam)
 			XDONClientData *clientData = (XDONClientData *)XMemAlloc(sizeof(XDONClientData), HEAP_MEMORY_ATTRS);
 			if (clientData == NULL)
 			{
+				InterlockedDecrement(&mConnectedClients);
 				continue;
 			}
 			clientData->sock = (SOCKET)clientSock;
@@ -130,6 +143,7 @@ bool WINAPI xdonServer::serverThread(LPVOID lParam)
 			{
 				XMemFree(clientData, HEAP_MEMORY_ATTRS);
 				socketUtility::closeSocket(clientSock);
+				InterlockedDecrement(&mConnectedClients);
 				continue;
 			}
 			clientData->responseMemory = (uint8_t *)XMemAlloc(XDON_RSP_MEM_SIZE, PHYSICAL_MEMORY_ATTRS);
@@ -138,6 +152,7 @@ bool WINAPI xdonServer::serverThread(LPVOID lParam)
 				XMemFree(clientData->requestMemory, PHYSICAL_MEMORY_ATTRS);
 				XMemFree(clientData, HEAP_MEMORY_ATTRS);
 				socketUtility::closeSocket(clientSock);
+				InterlockedDecrement(&mConnectedClients);
 				continue;
 			}
 			HANDLE clientHandler = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)clientThread, clientData, 0, NULL);
@@ -147,6 +162,7 @@ bool WINAPI xdonServer::serverThread(LPVOID lParam)
 				XMemFree(clientData->responseMemory, PHYSICAL_MEMORY_ATTRS);
 				XMemFree(clientData, HEAP_MEMORY_ATTRS);
 				socketUtility::closeSocket(clientSock);
+				InterlockedDecrement(&mConnectedClients);
 				continue;
 			}
 			SetThreadPriority(clientHandler, THREAD_PRIORITY_HIGHEST);
@@ -160,6 +176,14 @@ bool WINAPI xdonServer::serverThread(LPVOID lParam)
 			if (result < 0)
 			{
 				return result;
+			}
+			if (hddLockUnlock::isActive()) {
+				utils::debugPrint("HDD is being (un)locked, ignoring request from FATXplorer");
+				continue;
+			}
+			if (hddFormat::isActive()) {
+				utils::debugPrint("HDD is being (un)locked, ignoring request from FATXplorer");
+				continue;
 			}
 			result = processRequest(&mFakeClientData, &sender, sizeof(sender));
 			if (result < 0)
@@ -188,18 +212,11 @@ bool WINAPI xdonServer::serverThread(LPVOID lParam)
 bool WINAPI xdonServer::clientThread(LPVOID lParam)
 {
 	XDONClientData *clientData = (XDONClientData *)lParam;
-	// This could be racy
-	InterlockedIncrement(&mConnectedClients);
-	if (ftpServer::hasActiveConnections()) {
-		InterlockedDecrement(&mConnectedClients);
-		goto cleanup;
-	} else {
-		// Fine to terminate this late, write is not supported over UDP
-		// We don't know if the user wants to write to the disk (TODO: Add read only mode!) and if the program
-		// has to wait for the FTP server to terminate during a Write(Same) request then FATXplorer will
-		// potentially time out
-		ftpServer::close();
-	}
+	// Fine to terminate this late, write is not supported over UDP
+	// We don't know if the user wants to write to the disk (TODO: Add read only mode!) and if the program
+	// has to wait for the FTP server to terminate during a Write(Same) request then FATXplorer will
+	// potentially time out
+	ftpServer::close();
 	driveManager::unmountAllDrives();
 	sceneManager::lock();
 	if (sceneManager::getSceneItem() != sceneItemXDONLockout) {

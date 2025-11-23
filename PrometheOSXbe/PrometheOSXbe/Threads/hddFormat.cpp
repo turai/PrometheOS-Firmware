@@ -38,6 +38,11 @@ bool hddFormat::completed()
 	return false;
 }
 
+bool hddFormat::isActive()
+{
+	return mThread != NULL;
+}
+
 hddFormat::hddFormatResponse hddFormat::getResponse()
 {
 	hddFormatResponse response;
@@ -50,6 +55,7 @@ hddFormat::hddFormatResponse hddFormat::getResponse()
 void hddFormat::closeThread()
 {
 	CloseHandle(mThread);
+	mThread = NULL;
     DeleteCriticalSection(&mData.mutex);
 }
 

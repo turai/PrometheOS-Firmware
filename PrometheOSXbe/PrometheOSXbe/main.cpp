@@ -49,6 +49,7 @@
 #include "Threads\hddLockUnlock.h"
 #include "Plugins\PEProcess.h"
 #include "cerbiosIniHelper.h"
+#include "xdonServer.h"
 
 #include "stb_image_write.h"
 
@@ -314,6 +315,9 @@ utils::dataContainer* onGetCallback(const char* path, const char* query)
 		if (getParams->count() < 2) {
 			return httpServer::generateResponse(400, "Query must contain if the drive should be locked or unlocked, and the same nonce sent with the last drive info request");
 		}
+		if (xdonServer::hasConnectedClients()) {
+			return httpServer::generateResponse(503, "XDON is connected, HDD related functions are unavailable");
+		}
 		bool isLockReq = stringUtility::toInt(getParams->get(0)) == 1;
 		int clientNonce = stringUtility::toInt(getParams->get(1));
 		delete(getParams);
@@ -449,6 +453,9 @@ utils::dataContainer* onPostCallback(const char* path, const char* query, pointe
 	{
 		if (formParts->count() != 2) {
 			return httpServer::generateResponse(400, "Unexpected form parts.");
+		}
+		if (xdonServer::hasConnectedClients()) {
+			return httpServer::generateResponse(503, "XDON is connected, HDD related functions are unavailable");
 		}
 		FormPart* formPartDriveIdx = formParts->get(0);
 		char* sDriveIdx = (char*)formPartDriveIdx->body->data;

@@ -41,6 +41,11 @@ bool hddLockUnlock::completed()
 	return false;
 }
 
+bool hddLockUnlock::isActive()
+{
+	return mThread != NULL;
+}
+
 hddLockUnlock::hddLockUnlockResponse hddLockUnlock::getResponse()
 {
 	hddLockUnlockResponse response;
@@ -60,6 +65,7 @@ void hddLockUnlock::setResponse(hddLockUnlock::hddLockUnlockResponse response)
 void hddLockUnlock::closeThread()
 {
 	CloseHandle(mThread);
+	mThread = NULL;
     DeleteCriticalSection(&mData.mutex);
 }
 

@@ -21,6 +21,7 @@ public:
 
 	static bool startThread(int32_t harddrive);
 	static bool completed();
+	static bool isActive();
 	static hddFormatResponse getResponse();
 	static void closeThread();
 

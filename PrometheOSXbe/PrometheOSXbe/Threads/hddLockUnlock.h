@@ -37,6 +37,7 @@ public:
 
 	static bool startThread(hddLockUnlockAction action);
 	static bool completed();
+	static bool isActive();
 	static hddLockUnlockResponse getResponse();
 	static void closeThread();
 
