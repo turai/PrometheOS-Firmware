@@ -21,20 +21,18 @@ public:
 	} XDONClientData;
 
 private:
+	static DeviceInfo mDevices[11];
+	static bool mMemoryUnits[8];
+
 	static bool WINAPI serverThread(LPVOID lParam);
 	static bool WINAPI clientThread(LPVOID lParam);
-
 	static bool isDeviceOpen(DeviceIndex device);
 	static NTSTATUS openDevice(DeviceIndex device);
-
 	static int processRequest(XDONClientData *clientData, struct sockaddr_in *sender, size_t senderSize);
-
 	static int networkReadTCP(SOCKET sock, uint8_t* buffer, u_long bufferLen);
-
-	static int networkRead(SOCKET sock, uint8_t *buffer, int bufferLen, struct sockaddr_in *sender);
-	static int networkSendUDP(SOCKET sock, uint8_t *buffer, int bufferLen, struct sockaddr_in *sender);
 	static int networkSendTCP(SOCKET sock, uint8_t *buffer, int bufferLen);
-
+	static int networkReadUDP(SOCKET sock, uint8_t *buffer, int bufferLen, struct sockaddr_in *sender);
+	static int networkSendUDP(SOCKET sock, uint8_t *buffer, int bufferLen, struct sockaddr_in *sender);
 	static void getDevices(XDONDevices *devices);
 	static int readDevice(DeviceIndex device, uint64_t offset, uint8_t* buffer, int bufferLen);
 	static int writeDevice(DeviceIndex device, uint64_t offset, uint8_t* buffer, int bufferLen);

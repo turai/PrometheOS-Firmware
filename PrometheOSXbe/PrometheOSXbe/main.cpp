@@ -878,9 +878,8 @@ void __cdecl main()
 		refreshInfo();
 
 		sceneManager::lock();
-		scene = sceneManager::getScene();
-		scene->update();
-		scene->render();
+		sceneManager::getScene()->update();
+		sceneManager::getScene()->render();
 		sceneManager::unlock();
 
 		context::getD3dDevice()->EndScene();

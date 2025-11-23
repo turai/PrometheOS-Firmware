@@ -10,6 +10,7 @@ enum sceneResult
 class scene 
 {
 public:
+	virtual ~scene() {};
 	virtual void update() = 0;
 	virtual void render() = 0;
 };

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "krnStructs.h"
+#include "internal_structs.h"
 #include "harddrive.h"
 #include "xboxinternals.h"
 
